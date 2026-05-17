@@ -21,12 +21,12 @@ function parse_templates(filename::String)
         template = strip(template_str)
         isempty(template) && continue
 
-        # Parse "code -> JavaASTType -> returnType"
+        # Parse "code -> JavaASTType -> returnType -> ClassName -> PackageName"
         parts = split(template, " -> ")
-        length(parts) < 3 && continue
+        length(parts) < 5 && continue
 
-        return_type = sanitize_type(String(parts[end]))
-        code = strip(join(parts[1:end-2], " -> "))
+        return_type = sanitize_type(String(parts[end-2]))
+        code = strip(join(parts[1:end-4], " -> "))
 
         # Extract unique variables (_TypeName_N) in order of first occurrence
         seen = Set{String}()
@@ -76,6 +76,7 @@ function load_context(filename::String, grammar::AbstractGrammar)
         if startswith(line, "# Variables");         section = :variables;         continue; end
         if startswith(line, "# Methods of");        section = :class_methods;     continue; end
         if startswith(line, "# Methods reachable"); section = :instance_methods;  continue; end
+        if startswith(line, "# Fields");            section = :fields;            continue; end
         startswith(line, "#") && continue
 
         if section == :variables
@@ -85,6 +86,15 @@ function load_context(filename::String, grammar::AbstractGrammar)
             varname  = strip(parts[1])
             ret_type = sanitize_type(parts[2])
             add_rule!(grammar, :($ret_type = $varname))
+            push!(initial_types, ret_type)
+
+        elseif section == :fields
+            # "obj.fieldName : type"
+            parts = split(line, " : ", limit=2)
+            length(parts) != 2 && continue
+            ret_type     = sanitize_type(parts[2])
+            field_access = strip(parts[1])
+            add_rule!(grammar, :($ret_type = $field_access))
             push!(initial_types, ret_type)
 
         else  # :class_methods or :instance_methods — same shape, different prefix
@@ -187,8 +197,8 @@ function add_hierarchy_to_grammar!(grammar, records)
 end
 
 type_var = :(boolean)
-expr = quote 1 : Start = $type_var end
-grammar = HerbGrammar.expr2pcsgrammar(expr)
+start_expr = quote 1 : Start = $type_var end
+grammar = HerbGrammar.expr2pcsgrammar(start_expr)
 
 # grammar = HerbConstraints.@pcsgrammar begin
 #     1 : $exp
