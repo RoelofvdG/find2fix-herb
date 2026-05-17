@@ -187,7 +187,7 @@ function add_hierarchy_to_grammar!(grammar, records)
 end
 
 type_var = :(boolean)
-expr = quote 0.1 : Start = $type_var end
+expr = quote 1 : Start = $type_var end
 grammar = HerbGrammar.expr2pcsgrammar(expr)
 
 # grammar = HerbConstraints.@pcsgrammar begin
