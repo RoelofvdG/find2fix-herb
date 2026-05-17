@@ -1,0 +1,256 @@
+using Herb
+# using Herb, HerbGrammar, HerbConstraints, HerbSpecification, HerbSearch
+
+# Sanitize Java type names (e.g. "int[]", "Point2D") to valid Julia symbol names
+function normalize_type_name(s::AbstractString)::String
+    s = replace(s, "[]" => "_array")
+    s = replace(s, "." => "_")
+    return s
+end
+
+"""
+    parse_templates_to_grammar(filename) -> (grammar, template_map)
+
+Parse a templates.txt file (entries separated by `###`, each with the format
+`expr -> CtNodeType -> return_type`) into a Herb context-free grammar.
+
+Each unique (expr, return_type) pair becomes a production rule:
+  - LHS: the return type (e.g. `boolean`, `double`, `Shape`)
+  - RHS: `template_N` if the expression has no holes, or
+         `template_N(ArgType1, ArgType2, ...)` where ArgTypes come from the
+         typed placeholders `_TypeName_index` in the expression.
+
+Also returns `template_map`, a `Dict{Int,String}` mapping each `template_N`
+index back to the original Java expression string.
+"""
+function parse_templates_to_grammar(filename::String)
+    content = read(filename, String)
+
+    # Split on the ### separator
+    raw_entries = split(content, "###")
+
+    # Parse each entry: "expr -> CtNodeType -> return_type"
+    parsed = []
+    for entry in raw_entries
+        # Collapse internal whitespace (handles multi-line expressions)
+        line = strip(replace(entry, r"\s+" => " "))
+        isempty(line) && continue
+
+        parts = split(line, " -> ")
+        length(parts) < 3 && continue
+
+        return_type = normalize_type_name(strip(parts[end]))
+        expr        = strip(join(parts[1:end-2], " -> "))   # node_type is parts[end-1]
+
+        push!(parsed, (expr=expr, return_type=return_type))
+    end
+
+    # Deduplicate by (expr, return_type)
+    seen = Set{Tuple{String,String}}()
+    unique_templates = filter(parsed) do t
+        key = (t.expr, t.return_type)
+        key ∉ seen ? (push!(seen, key); true) : false
+    end
+
+    # Match top-level placeholders only (not field accesses preceded by '.')
+    # Placeholder format: _TypeName_index  or  _TypeName[]_index
+    ph_re = r"(?<!\.)_([A-Za-z][A-Za-z0-9]*(?:\[\])?)_(\d+)"
+
+    function get_arg_types(expr::AbstractString)::Vector{String}
+        idx_to_type = Dict{Int,String}()
+        for m in eachmatch(ph_re, expr)
+            idx = parse(Int, m.captures[2])
+            haskey(idx_to_type, idx) || (idx_to_type[idx] = normalize_type_name(m.captures[1]))
+        end
+        return [idx_to_type[k] for k in sort(collect(keys(idx_to_type)))]
+    end
+
+    # Build one grammar rule per unique template
+    rule_exprs   = Expr[]
+    template_map = Dict{Int,String}()
+
+    for (i, t) in enumerate(unique_templates)
+        template_map[i] = t.expr
+        lhs       = Symbol(t.return_type)
+        arg_types = get_arg_types(t.expr)
+
+        # Replace placeholders with their type names and try parsing as Julia.
+        # If it parses, use the expression directly; otherwise fall back to template_N(...).
+        julia_str = replace(string(t.expr), ph_re => m -> normalize_type_name(match(ph_re, m).captures[1]))
+        rhs = try
+            parsed = Meta.parse(julia_str)
+            (Meta.isexpr(parsed, :incomplete) || Meta.isexpr(parsed, :error)) ? nothing : parsed
+        catch
+            nothing
+        end
+
+        if rhs === nothing
+            rhs = isempty(arg_types) ? Symbol("template_$i") :
+                  Expr(:call, Symbol("template_$i"), Symbol.(arg_types)...)
+        end
+
+        push!(rule_exprs, :($lhs = $rhs))
+    end
+
+    grammar_block = Expr(:block, rule_exprs...)
+    grammar = eval(:(HerbConstraints.@csgrammar $grammar_block))
+    return grammar, template_map
+end
+
+"""
+    parse_context_to_grammar(filename) -> grammar
+
+Parse a context.txt file into a Herb grammar. Three sections are handled:
+  - Variables in scope:     `name : Type`  →  `Type = name`
+  - Class methods:          `f(T1,T2) : Ret`  →  `Ret = f(T1, T2)`
+  - Instance method calls:  `var.f(T1) : Ret`  →  `Ret = var.f(T1)`
+
+Fully-qualified Java types (e.g. `java.awt.geom.GeneralPath`) are reduced to
+their simple name (`GeneralPath`) before normalization.
+"""
+function parse_context_to_grammar(filename::String)
+    content = read(filename, String)
+    lines   = split(content, '\n')
+
+    rule_exprs = Expr[]
+    section    = :none
+
+    # Drop package prefix: "java.awt.geom.GeneralPath" -> "GeneralPath"
+    simple(t::AbstractString) = string(last(split(strip(t), '.')))
+    norm(t::AbstractString)   = normalize_type_name(simple(t))
+
+    for line in lines
+        line = strip(line)
+        isempty(line) && continue
+
+        if   startswith(line, "# Variables");          section = :variables;        continue
+        elseif startswith(line, "# Methods of enclosing"); section = :class_methods;   continue
+        elseif startswith(line, "# Methods reachable");   section = :instance_methods; continue
+        elseif startswith(line, "#");                  continue
+        end
+
+        parts = split(line, " : ")
+        length(parts) == 2 || continue
+        ret = Symbol(norm(parts[2]))
+
+        if section == :variables
+            # "SQRT2 : float"  ->  float = SQRT2
+            push!(rule_exprs, :($ret = $(Symbol(strip(parts[1])))))
+
+        elseif section == :class_methods
+            # "equal(java.awt.Shape, java.awt.Shape) : boolean"
+            m = match(r"^(\w+)\((.*)\)$", strip(parts[1]))
+            m === nothing && continue
+            fname      = Symbol(m.captures[1])
+            params_str = strip(m.captures[2])
+            pargs      = isempty(params_str) ? Symbol[] :
+                         [Symbol(norm(p)) for p in split(params_str, ',')]
+            rhs = isempty(pargs) ? fname : Expr(:call, fname, pargs...)
+            push!(rule_exprs, :($ret = $rhs))
+
+        elseif section == :instance_methods
+            # "iterator1.isDone() : boolean"
+            m = match(r"^(\w+)\.(\w+)\((.*)\)$", strip(parts[1]))
+            m === nothing && continue
+            var_sym    = Symbol(m.captures[1])
+            meth_sym   = Symbol(m.captures[2])
+            params_str = strip(m.captures[3])
+            pargs      = isempty(params_str) ? Symbol[] :
+                         [Symbol(norm(p)) for p in split(params_str, ',')]
+            rhs = Expr(:call, Expr(:., var_sym, QuoteNode(meth_sym)), pargs...)
+            push!(rule_exprs, :($ret = $rhs))
+        end
+    end
+
+    grammar_block = Expr(:block, rule_exprs...)
+    return eval(:(HerbConstraints.@csgrammar $grammar_block))
+end
+
+"""
+    render_expr(expr, template_map) -> String
+
+Recursively render a synthesized Herb expression back to its original form.
+For `template_N(arg1, arg2, ...)` calls, the corresponding Java template string
+is looked up in `template_map` and the typed placeholders are replaced by the
+rendered arguments. All other nodes are rendered as their Julia string form.
+"""
+function render_expr(expr, template_map)
+    ph_re = r"(?<!\.)_([A-Za-z][A-Za-z0-9]*(?:\[\])?)_(\d+)"
+
+    # Look up a template index from a Symbol or the head of a :call Expr
+    template_sym = if isa(expr, Symbol)
+        expr
+    elseif Meta.isexpr(expr, :call) && isa(expr.args[1], Symbol)
+        expr.args[1]
+    else
+        nothing
+    end
+
+    if template_sym !== nothing
+        m = match(r"^template_(\d+)$", string(template_sym))
+        if m !== nothing
+            i = parse(Int, m.captures[1])
+            if haskey(template_map, i)
+                template_str = template_map[i]
+                rendered_args = Meta.isexpr(expr, :call) ?
+                    [render_expr(a, template_map) for a in expr.args[2:end]] : String[]
+                indices = sort(unique([parse(Int, m2.captures[2])
+                                       for m2 in eachmatch(ph_re, template_str)]))
+                idx_to_arg = Dict(indices[j] => rendered_args[j]
+                                  for j in 1:min(length(indices), length(rendered_args)))
+                return replace(template_str, ph_re => m2 -> begin
+                    idx = parse(Int, match(ph_re, m2).captures[2])
+                    get(idx_to_arg, idx, normalize_type_name(match(ph_re, m2).captures[1]))
+                end)
+            end
+        end
+    end
+    return string(expr)
+end
+
+# define our very simple context-free grammar
+grammar = HerbConstraints.@csgrammar begin
+    Start = double
+    double = x
+    double = performSophisticatedCalculation(double)
+    double = Math.max(double, double)
+    double = Math.min(double, double)
+end
+
+grammar, template_map = parse_templates_to_grammar("templates.txt")
+
+type_var = :(boolean)
+add_rule!(grammar, :(Start = $(type_var)))
+
+# println("Parsed $(length(grammar.rules)) grammar rules:")
+# for (i, (lhs, rhs)) in enumerate(zip(grammar.types, grammar.rules))
+#     rhs_str = template_map[i]
+#     println("  [$i] $lhs = $rhs")
+# end
+
+# Combined grammar: templates + context
+grammar2, template_map2 = parse_templates_to_grammar("templates.txt")
+context_grammar = parse_context_to_grammar("context.txt")
+for (lhs, rhs) in zip(context_grammar.types, context_grammar.rules)
+    add_rule!(grammar2, :($lhs = $rhs))
+end
+add_rule!(grammar2, :(Start = $(type_var)))
+
+println("\ngrammar2 has $(length(grammar2.rules)) rules ($(length(grammar.rules)) templates + $(length(context_grammar.rules)) context):")
+ph_display_re = r"(?<!\.)_([A-Za-z][A-Za-z0-9]*(?:\[\])?)_(\d+)"
+for (i, (lhs, rhs)) in enumerate(zip(grammar2.types, grammar2.rules))
+    fname = Meta.isexpr(rhs, :call) ? string(rhs.args[1]) : string(rhs)
+    rhs_str = if fname == "template_$i" && haskey(template_map2, i)
+        replace(template_map2[i], ph_display_re => m -> normalize_type_name(match(ph_display_re, m).captures[1]))
+    else
+        string(rhs)
+    end
+    println("  [$i] $lhs = $rhs_str")
+end
+
+# define a breadth-first iterator over program trees with root node :Start and max depth 5
+iterator = HerbSearch.BFSIterator(grammar2, :Start, max_depth=2)
+for rn in iterator
+    expr = rulenode2expr(rn, grammar2)
+    println("Testing candidate: ", render_expr(expr, template_map2))
+end
