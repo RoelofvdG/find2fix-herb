@@ -1,5 +1,9 @@
 using Herb, HerbConstraints
 
+templates_file = length(ARGS) >= 1 ? ARGS[1] : "templates.txt"
+context_file   = length(ARGS) >= 2 ? ARGS[2] : "context.txt"
+hierarchy_file = length(ARGS) >= 3 ? ARGS[3] : "type_hierarchy.txt"
+
 # Sanitize Java type names (e.g. "int[]", "Point2D.Double") to valid Julia symbols.
 function sanitize_type(t::AbstractString)
     t = strip(t)
@@ -204,9 +208,9 @@ grammar = HerbGrammar.expr2pcsgrammar(start_expr)
 #     1 : $exp
 # end
 
-template_records  = parse_templates("templates.txt")
-grammar, initial_types, ctx_method_rules = load_context("context.txt", grammar)
-hierarchy_records = parse_type_hierarchy("type_hierarchy.txt")
+template_records  = parse_templates(templates_file)
+grammar, initial_types, ctx_method_rules = load_context(context_file, grammar)
+hierarchy_records = parse_type_hierarchy(hierarchy_file)
 
 reachable = compute_reachable_types(initial_types, template_records, hierarchy_records, ctx_method_rules)
 
@@ -220,7 +224,7 @@ for (i, (type, rule)) in enumerate(zip(grammar.types, grammar.rules))
     println("$i: $type = $rule")
 end
 
-iterator = HerbSearch.BFSIterator(grammar, :Start, max_depth=4)
+iterator = HerbSearch.BFSIterator(grammar, :Start, max_depth=3)
 for rn in iterator
     expr = rulenode2expr(rn, grammar)
     try
