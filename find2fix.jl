@@ -1,8 +1,20 @@
 using Herb, HerbConstraints
 
-templates_file = length(ARGS) >= 1 ? ARGS[1] : "templates.txt"
-context_file   = length(ARGS) >= 2 ? ARGS[2] : "context.txt"
-hierarchy_file = length(ARGS) >= 3 ? ARGS[3] : "type_hierarchy.txt"
+let flags = Dict{String,String}()
+    i = 1
+    while i <= length(ARGS)
+        if startswith(ARGS[i], "--") && i + 1 <= length(ARGS) && !startswith(ARGS[i+1], "--")
+            flags[ARGS[i][3:end]] = ARGS[i+1]
+            i += 2
+        else
+            error("Expected --flag value, got: $(ARGS[i])")
+        end
+    end
+    global templates_file   = get(flags, "templates",    "templates.txt")
+    global context_file     = get(flags, "context",      "context.txt")
+    global hierarchy_file   = get(flags, "hierarchy",    "type_hierarchy.txt")
+    global target_type_file = get(flags, "target-type",  "target_type.txt")
+end
 
 # Sanitize Java type names (e.g. "int[]", "Point2D.Double") to valid Julia symbols.
 function sanitize_type(t::AbstractString)
@@ -200,7 +212,11 @@ function add_hierarchy_to_grammar!(grammar, records)
     end
 end
 
-type_var = :(boolean)
+target_type_str = let
+    kv = filter(l -> startswith(strip(l), "type:"), readlines(target_type_file))
+    isempty(kv) ? error("No 'type:' entry found in $target_type_file") : sanitize_type(split(kv[1], ":", limit=2)[2])
+end
+type_var = target_type_str
 start_expr = quote 1 : Start = $type_var end
 grammar = HerbGrammar.expr2pcsgrammar(start_expr)
 
