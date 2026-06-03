@@ -73,19 +73,21 @@ function parse_templates(filename::String)
 end
 
 # Reads context.txt and adds terminal/non-terminal grammar rules for:
-#   - in-scope variables  (NAME : type  →  terminal: type = "NAME")
-#   - enclosing class methods  (method(params) : ret  →  ret = context_n(paramTypes...))
-#   - instance methods on in-scope objects  (obj.method(params) : ret  →  same pattern)
+#   - in-scope variables  (NAME : type : global_freq : local_freq)
+#   - enclosing class methods  (method(params) : ret : global_freq : local_freq)
+#   - instance methods on in-scope objects  (same shape)
 #
 # Also returns:
-#   initial_types     – Set{Symbol} of variable types and zero-arg method return types
-#   ctx_method_rules  – Vector of (return_type, param_types) for parameterized methods
+#   initial_types        – Set{Symbol} of variable/field/zero-arg-method return types
+#   ctx_method_rules     – Vector of (return_type, param_types, global_freq, local_freq)
+#   ctx_terminal_entries – Vector of (kind, name, ret_type, global_freq, local_freq)
 function load_context(filename::String, grammar::AbstractGrammar)
     lines = readlines(filename)
     section = :variables
     method_counter = 0
     initial_types = Set{Symbol}()
     ctx_method_rules = []
+    ctx_terminal_entries = []
 
     for line in lines
         line = strip(line)
@@ -96,56 +98,56 @@ function load_context(filename::String, grammar::AbstractGrammar)
         if startswith(line, "# Fields");            section = :fields;            continue; end
         startswith(line, "#") && continue
 
+        # All lines: "... : type : global_freq : local_freq"
+        parts = split(line, " : ")
+        length(parts) < 4 && continue
+        global_freq = parse(Int, strip(parts[end-1]))
+        local_freq  = parse(Int, strip(parts[end]))
+
         if section == :variables
-            # "VARNAME : java.type"
-            parts = split(line, " : ", limit=2)
-            length(parts) != 2 && continue
             varname  = strip(parts[1])
-            ret_type = sanitize_type(parts[2])
+            ret_type = sanitize_type(parts[end-2])
             add_rule!(grammar, :($ret_type = $varname))
             push!(initial_types, ret_type)
+            push!(ctx_terminal_entries, (kind=:variable, name=varname, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
 
         elseif section == :fields
-            # "obj.fieldName : type"
-            parts = split(line, " : ", limit=2)
-            length(parts) != 2 && continue
-            ret_type     = sanitize_type(parts[2])
-            field_access = strip(parts[1])
+            field_access = strip(join(parts[1:end-3], " : "))
+            ret_type     = sanitize_type(parts[end-2])
             add_rule!(grammar, :($ret_type = $field_access))
             push!(initial_types, ret_type)
+            push!(ctx_terminal_entries, (kind=:field, name=field_access, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
 
         else  # :class_methods or :instance_methods — same shape, different prefix
-            # "prefix(param1, param2, ...) : returnType"
-            parts = split(line, " : ", limit=2)
-            length(parts) != 2 && continue
-            ret_type = sanitize_type(parts[2])
+            ret_type   = sanitize_type(parts[end-2])
+            method_sig = strip(join(parts[1:end-3], " : "))
 
-            m = match(r"^([\w.]+)\((.*)\)$", strip(parts[1]))
+            m = match(r"^([\w.]+)\((.*)\)$", method_sig)
             m === nothing && continue
-            prefix    = String(m.captures[1])   # e.g. "clone" or "iterator1.currentSegment"
+            prefix     = String(m.captures[1])   # e.g. "clone" or "iterator1.currentSegment"
             params_str = strip(m.captures[2])
 
             if isempty(params_str)
-                # Zero-param method → terminal string "prefix()"
                 call = prefix * "()"
                 add_rule!(grammar, :($ret_type = $call))
                 push!(initial_types, ret_type)
+                push!(ctx_terminal_entries, (kind=:method, name=call, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
             else
                 param_types = [sanitize_type(p) for p in split(params_str, ", ")]
                 method_counter += 1
-                fname  = Symbol("context_method_", method_counter)
+                fname   = Symbol("context_method_", method_counter)
                 fparams = [Symbol("arg", i) for i in 1:length(param_types)]
                 call_prefix = prefix * "("
                 @eval function $(fname)($(fparams...))
                     return $call_prefix * join([$(fparams...)], ", ") * ")"
                 end
                 add_rule!(grammar, :($ret_type = $(fname)($(param_types...))))
-                push!(ctx_method_rules, (return_type=ret_type, param_types=param_types))
+                push!(ctx_method_rules, (return_type=ret_type, param_types=param_types, global_freq=global_freq, local_freq=local_freq))
             end
         end
     end
 
-    return grammar, initial_types, ctx_method_rules
+    return grammar, initial_types, ctx_method_rules, ctx_terminal_entries
 end
 
 # Parses type_hierarchy.txt and returns a Vector of NamedTuples (child_type, parent_type).
@@ -226,7 +228,7 @@ grammar = HerbGrammar.expr2pcsgrammar(start_expr)
 # end
 
 template_records  = parse_templates(templates_file)
-grammar, initial_types, ctx_method_rules = load_context(context_file, grammar)
+grammar, initial_types, ctx_method_rules, ctx_terminal_entries = load_context(context_file, grammar)
 hierarchy_records = parse_type_hierarchy(hierarchy_file)
 
 reachable = compute_reachable_types(initial_types, template_records, hierarchy_records, ctx_method_rules)
