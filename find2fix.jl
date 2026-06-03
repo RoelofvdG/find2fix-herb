@@ -37,12 +37,13 @@ function parse_templates(filename::String)
         template = strip(template_str)
         isempty(template) && continue
 
-        # Parse "code -> JavaASTType -> returnType -> ClassName -> PackageName"
+        # Parse "code -> JavaASTType -> returnType -> ClassName -> PackageName -> occurrenceCount"
         parts = split(template, " -> ")
-        length(parts) < 5 && continue
+        length(parts) < 6 && continue
 
-        return_type = sanitize_type(String(parts[end-2]))
-        code = strip(join(parts[1:end-4], " -> "))
+        occurrence_count = parse(Int, strip(parts[end]))
+        return_type = sanitize_type(String(parts[end-3]))
+        code = strip(join(parts[1:end-5], " -> "))
 
         # Extract unique variables (_TypeName_N) in order of first occurrence
         seen = Set{String}()
@@ -65,7 +66,7 @@ function parse_templates(filename::String)
             end
         end
 
-        push!(records, (name=name, return_type=return_type, arg_types=arg_types, code=code, variables=variables))
+        push!(records, (name=name, return_type=return_type, arg_types=arg_types, code=code, variables=variables, occurrence_count=occurrence_count))
     end
 
     return records
@@ -244,7 +245,7 @@ iterator = HerbSearch.BFSIterator(grammar, :Start, max_depth=3)
 for rn in iterator
     expr = rulenode2expr(rn, grammar)
     try
-        println("Testing candidate: ", @eval $expr)
+        println("Testing candidate: (", @eval($expr), ")")
     catch e
         if e isa UndefVarError
             # println("Undefined variable in candidate: ", e)
