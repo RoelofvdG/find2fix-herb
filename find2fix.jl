@@ -104,17 +104,19 @@ function load_context(filename::String, grammar::AbstractGrammar)
         global_freq = parse(Int, strip(parts[end-1]))
         local_freq  = parse(Int, strip(parts[end]))
 
+        p = max(local_freq, 1)
+
         if section == :variables
             varname  = strip(parts[1])
             ret_type = sanitize_type(parts[end-2])
-            add_rule!(grammar, :($ret_type = $varname))
+            add_rule!(grammar, p, :($ret_type = $varname); normalize=false)
             push!(initial_types, ret_type)
             push!(ctx_terminal_entries, (kind=:variable, name=varname, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
 
         elseif section == :fields
             field_access = strip(join(parts[1:end-3], " : "))
             ret_type     = sanitize_type(parts[end-2])
-            add_rule!(grammar, :($ret_type = $field_access))
+            add_rule!(grammar, p, :($ret_type = $field_access); normalize=false)
             push!(initial_types, ret_type)
             push!(ctx_terminal_entries, (kind=:field, name=field_access, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
 
@@ -129,11 +131,11 @@ function load_context(filename::String, grammar::AbstractGrammar)
 
             if isempty(params_str)
                 call = prefix * "()"
-                add_rule!(grammar, :($ret_type = $call))
+                add_rule!(grammar, p, :($ret_type = $call); normalize=false)
                 push!(initial_types, ret_type)
                 push!(ctx_terminal_entries, (kind=:method, name=call, ret_type=ret_type, global_freq=global_freq, local_freq=local_freq))
             else
-                param_types = [sanitize_type(p) for p in split(params_str, ", ")]
+                param_types = [sanitize_type(pt) for pt in split(params_str, ", ")]
                 method_counter += 1
                 fname   = Symbol("context_method_", method_counter)
                 fparams = [Symbol("arg", i) for i in 1:length(param_types)]
@@ -141,7 +143,7 @@ function load_context(filename::String, grammar::AbstractGrammar)
                 @eval function $(fname)($(fparams...))
                     return $call_prefix * join([$(fparams...)], ", ") * ")"
                 end
-                add_rule!(grammar, :($ret_type = $(fname)($(param_types...))))
+                add_rule!(grammar, p, :($ret_type = $(fname)($(param_types...))); normalize=false)
                 push!(ctx_method_rules, (return_type=ret_type, param_types=param_types, global_freq=global_freq, local_freq=local_freq))
             end
         end
@@ -200,10 +202,11 @@ end
 # Adds grammar rules for template records whose arg_types are all reachable.
 function add_templates_to_grammar!(grammar, records)
     for t in records
+        p = max(t.occurrence_count, 1)
         if isempty(t.arg_types)
-            add_rule!(grammar, :($(t.return_type) = $(t.code)))
+            add_rule!(grammar, p, :($(t.return_type) = $(t.code)); normalize=false)
         else
-            add_rule!(grammar, :($(t.return_type) = $(t.name)($(t.arg_types...))))
+            add_rule!(grammar, p, :($(t.return_type) = $(t.name)($(t.arg_types...))); normalize=false)
         end
     end
 end
@@ -211,7 +214,7 @@ end
 # Adds grammar rules for hierarchy records whose child_type is reachable.
 function add_hierarchy_to_grammar!(grammar, records)
     for r in records
-        add_rule!(grammar, :($(r.parent_type) = $(r.child_type)))
+        add_rule!(grammar, 1, :($(r.parent_type) = $(r.child_type)); normalize=false)
     end
 end
 
@@ -238,6 +241,7 @@ usable_hierarchy  = filter(r -> r.child_type ∈ reachable, hierarchy_records)
 
 add_templates_to_grammar!(grammar, usable_templates)
 add_hierarchy_to_grammar!(grammar, usable_hierarchy)
+normalize!(grammar)
 
 for (i, (type, rule)) in enumerate(zip(grammar.types, grammar.rules))
     println("$i: $type = $rule")
