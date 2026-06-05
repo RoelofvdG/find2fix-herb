@@ -1,11 +1,15 @@
 using Herb, HerbConstraints
 
 let flags = Dict{String,String}()
+    bool_flags = Set{String}()
     i = 1
     while i <= length(ARGS)
         if startswith(ARGS[i], "--") && i + 1 <= length(ARGS) && !startswith(ARGS[i+1], "--")
             flags[ARGS[i][3:end]] = ARGS[i+1]
             i += 2
+        elseif startswith(ARGS[i], "--")
+            push!(bool_flags, ARGS[i][3:end])
+            i += 1
         else
             error("Expected --flag value, got: $(ARGS[i])")
         end
@@ -14,6 +18,7 @@ let flags = Dict{String,String}()
     global context_file     = get(flags, "context",      "context.txt")
     global hierarchy_file   = get(flags, "hierarchy",    "type_hierarchy.txt")
     global target_type_file = get(flags, "target-type",  "target_type.txt")
+    global production_mode  = "production" in bool_flags
 end
 
 # Sanitize Java type names (e.g. "int[]", "Point2D.Double") to valid Julia symbols.
@@ -243,15 +248,21 @@ add_templates_to_grammar!(grammar, usable_templates)
 add_hierarchy_to_grammar!(grammar, usable_hierarchy)
 normalize!(grammar)
 
-for (i, (type, rule)) in enumerate(zip(grammar.types, grammar.rules))
-    println("$i: $type = $rule")
+if production_mode
+    println("Grammar contains $(length(grammar.rules)) rules")
+else
+    for (i, (type, rule)) in enumerate(zip(grammar.types, grammar.rules))
+        println("$i: $type = $rule")
+    end
 end
 
 iterator = HerbSearch.BFSIterator(grammar, :Start, max_depth=3)
+candidate_count = 0
 for rn in iterator
     expr = rulenode2expr(rn, grammar)
     try
         println("Testing candidate: (", @eval($expr), ")")
+        candidate_count += 1
     catch e
         if e isa UndefVarError
             # println("Undefined variable in candidate: ", e)
@@ -260,6 +271,9 @@ for rn in iterator
         else
             throw(e)
         end
+    end
+    if production_mode && candidate_count >= 100
+        break
     end
     # <Java stuff :) >
 end
