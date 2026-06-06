@@ -272,7 +272,7 @@ for rn in iterator
             throw(e)
         end
     end
-    if production_mode && candidate_count >= 100
+    if production_mode && candidate_count >= 50
         break
     end
     # <Java stuff :) >
