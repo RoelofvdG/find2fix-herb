@@ -284,6 +284,8 @@ for rn in iterator
     end
     if production_mode && candidate_count >= 300
         break
+    elseif candidate_count >= 1000
+        break
     end
     # <Java stuff :) >
 end
