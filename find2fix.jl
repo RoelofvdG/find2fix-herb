@@ -19,6 +19,10 @@ let flags = Dict{String,String}()
     global hierarchy_file   = get(flags, "hierarchy",    "type_hierarchy.txt")
     global target_type_file = get(flags, "target-type",  "target_type.txt")
     global production_mode  = "production" in bool_flags
+
+    cli_iterator = lowercase(get(flags, "iterator", "bfs"))
+    env_iterator = lowercase(strip(get(ENV, "FIND2FIX_ITERATOR", "")))
+    global iterator_kind = isempty(env_iterator) ? cli_iterator : env_iterator
 end
 
 # Sanitize Java type names (e.g. "int[]", "Point2D.Double") to valid Julia symbols.
@@ -256,7 +260,13 @@ else
     end
 end
 
-iterator = HerbSearch.BFSIterator(grammar, :Start, max_depth=3)
+iterator = if iterator_kind == "mlfs"
+    HerbSearch.MLFSIterator(grammar, :Start, max_depth=3)
+elseif iterator_kind == "bfs"
+    HerbSearch.BFSIterator(grammar, :Start, max_depth=3)
+else
+    error("Unknown iterator \"$iterator_kind\" (expected \"bfs\" or \"mlfs\")")
+end
 candidate_count = 0
 for rn in iterator
     expr = rulenode2expr(rn, grammar)
