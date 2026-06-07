@@ -262,7 +262,7 @@ for rn in iterator
     expr = rulenode2expr(rn, grammar)
     try
         println("Testing candidate: (", @eval($expr), ")")
-        candidate_count += 1
+        global candidate_count += 1
     catch e
         if e isa UndefVarError
             # println("Undefined variable in candidate: ", e)
@@ -272,7 +272,7 @@ for rn in iterator
             throw(e)
         end
     end
-    if production_mode && candidate_count >= 50
+    if production_mode && candidate_count >= 300
         break
     end
     # <Java stuff :) >
